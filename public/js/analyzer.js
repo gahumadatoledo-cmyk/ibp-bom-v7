@@ -328,6 +328,7 @@
         }
 
         var results = (data.d && data.d.results) ? data.d.results : (data.value || []);
+        if (typeof stripODataEnvelope === 'function') stripODataEnvelope(results);
 
         // Normalizar filas: añadir alias canónicos según FIELD_MAP
         if (typeof normalizeRows === 'function') {

@@ -828,7 +828,10 @@ async function doProductionAnalysis() {
     if (!_paWantWeb) document.getElementById('paSuccessBanner').classList.remove('hidden');
 
   } catch(e) {
-    log(logEl, 'err', timer.fmt() + ' Error: ' + e.message);
+    // El nombre del DOMException distingue causas que comparten mensaje
+    // (QuotaExceededError, UnknownError de IndexedDB, TypeError, etc.).
+    log(logEl, 'err', timer.fmt() + ' ' + ((e && e.name) || 'Error') + ': ' + (e && e.message));
+    try { console.error('[PA] Fallo en el análisis', e); } catch (_) {}
     var errEl = document.getElementById('progStatusTextPA');
     if (errEl) { errEl.style.color = 'var(--red)'; errEl.textContent = 'Error: ' + e.message; }
     var _pbPA = document.getElementById('progBarPA'); if (_pbPA) _pbPA.classList.add('hidden');  // sin barra parcial junto al error
@@ -1115,9 +1118,14 @@ async function paAnalyzeAndExport(
   var locSrcPrdSet      = new Set();
   var locSrcByLocfr     = {};         // LOCFR → [{PRDID, LOCID}]
   var locSrcByLocid     = {};         // LOCID → [{PRDID, LOCFR}]
+  var locSrcOrigByPrd   = {};         // PRDID → Set<LOCFR> — orígenes en red
   allLocSrc.forEach(function(r) {
     var prd = str(r.PRDID), locfr = str(r.LOCFR || ''), locid = str(r.LOCID || ''), tlt = str(r.TLEADTIME || '');
     if (prd) locSrcPrdSet.add(prd);
+    if (prd && locfr) {
+      if (!locSrcOrigByPrd[prd]) locSrcOrigByPrd[prd] = new Set();
+      locSrcOrigByPrd[prd].add(locfr);
+    }
     if (prd && locid) {
       var k = prd + '|' + locid;
       if (!locSrcByPrdLoc[k]) locSrcByPrdLoc[k] = [];
@@ -1241,13 +1249,13 @@ async function paAnalyzeAndExport(
     return { covered: covered, uncovered: uncovered };
   }
 
-  // Orígenes en red para un PRDID (LOCFR en LocSrc)
+  // Orígenes en red para un PRDID (LOCFR en LocSrc).
+  // Se resuelve contra el índice precomputado en la pasada de Location Source:
+  // escanear allLocSrc por producto era O(productos × filas LS) — con 5.6k
+  // productos y 616k arcos son ~3.500 millones de iteraciones por corrida.
+  var _LS_NO_ORIGINS = new Set();
   function _originsInNet(prd) {
-    var origins = new Set();
-    allLocSrc.forEach(function(r) {
-      if (str(r.PRDID) === prd && str(r.LOCFR || '')) origins.add(str(r.LOCFR));
-    });
-    return origins;
+    return locSrcOrigByPrd[prd] || _LS_NO_ORIGINS;
   }
 
   /* ── Mattype CFG ── */
