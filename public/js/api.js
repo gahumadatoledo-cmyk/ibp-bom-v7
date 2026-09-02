@@ -182,14 +182,45 @@
       });
     }
 
-    function idbGetAll(storeName) {
+    /* Lee un tramo del store acotado por clave: devuelve { keys, rows } con
+       como máximo `limit` registros a partir de `afterKey` (excluido).
+       afterKey === null arranca desde el principio. */
+    function _idbGetChunk(storeName, afterKey, limit) {
       return new Promise(function (resolve, reject) {
-        var tx = IDB.transaction(storeName, 'readonly');
+        var tx    = IDB.transaction(storeName, 'readonly');
         _txReject(tx, reject);
-        var req = tx.objectStore(storeName).getAll();
-        req.onsuccess = function (e) { resolve(e.target.result || []); };
-        req.onerror = function (e) { reject(e.target.error); };
+        var store = tx.objectStore(storeName);
+        var range = (afterKey === null || afterKey === undefined)
+          ? null
+          : IDBKeyRange.lowerBound(afterKey, true);
+        var out = { keys: null, rows: null };
+        var kReq = store.getAllKeys(range, limit);
+        var vReq = store.getAll(range, limit);
+        kReq.onsuccess = function (e) { out.keys = e.target.result || []; if (out.rows) resolve(out); };
+        vReq.onsuccess = function (e) { out.rows = e.target.result || []; if (out.keys) resolve(out); };
+        kReq.onerror = function (e) { reject(e.target.error); };
+        vReq.onerror = function (e) { reject(e.target.error); };
       });
+    }
+
+    /* Lee un store completo en tramos.
+       Un getAll() sin acotar devuelve todo el store en UN solo mensaje IPC, y
+       Chromium lo rechaza por encima de ~246 MB con
+       "The serialized value is too large". Paginar por clave mantiene cada
+       mensaje bajo el tope sin cambiar el resultado ni el orden. */
+    var IDB_GETALL_CHUNK = 50000;
+
+    async function idbGetAll(storeName) {
+      var all = [], afterKey = null;
+      for (;;) {
+        var chunk = await _idbGetChunk(storeName, afterKey, IDB_GETALL_CHUNK);
+        if (!chunk.rows.length) break;
+        // concat en bloque: más barato que push por elemento en arrays grandes
+        all = all.length ? all.concat(chunk.rows) : chunk.rows;
+        if (chunk.rows.length < IDB_GETALL_CHUNK) break;
+        afterKey = chunk.keys[chunk.keys.length - 1];
+      }
+      return all;
     }
 
     /* Itera todos los registros de un store con cursor (bajo consumo de RAM).
@@ -374,6 +405,21 @@
       return (entityUrl || '').split('?')[0].split('/').pop();
     }
 
+    /* Elimina el sobre __metadata de OData V2 de cada fila.
+       SAP lo devuelve siempre, incluso con $select, y trae la uri completa de
+       la entidad con todas sus claves (~450 bytes por fila en entidades como
+       Location Source). Ningún módulo lo lee, pero se guardaba en IndexedDB y
+       multiplicaba por 5 el peso de los stores grandes.
+       Muta las filas in situ: son objetos recién parseados de la respuesta. */
+    function stripODataEnvelope(rows) {
+      if (!rows || !rows.length) return rows;
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        if (r && typeof r === 'object' && r.__metadata !== undefined) delete r.__metadata;
+      }
+      return rows;
+    }
+
     async function fetchAllPages(entityUrl, logEl, pverFilter, selectFields) {
       var all = [];
       var PAGE_SIZE = 50000;
@@ -424,6 +470,7 @@
         }
 
         var results = (data.d && data.d.results) ? data.d.results : (data.value || []);
+        stripODataEnvelope(results);
 
         // Normalizar filas: añadir alias canónicos según FIELD_MAP
         if (typeof normalizeRows === 'function') {
